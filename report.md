@@ -66,3 +66,7 @@ TensorFlow 2.6 以後的官方預編譯版本要求 CPU 支援 **AVX 指令集**
 ```bash
 -cpu host
 ```
+
+## 五、參考文件
+
+- **TensorFlow 官方網站安裝指引** https://www.tensorflow.org/install/pip?hl=zh-tw

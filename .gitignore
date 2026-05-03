@@ -228,3 +228,4 @@ data/*
 .cursor/
 
 *.pth
+*.h5

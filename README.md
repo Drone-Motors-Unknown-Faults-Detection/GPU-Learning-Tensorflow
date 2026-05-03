@@ -222,9 +222,11 @@ ENABLE_LOGGING = True   # 改為 False 可關閉
 
 ## 環境需求
 
-- Python 3.8+
-- TensorFlow 2.12+
-- tqdm
+- Python 3.10.12
+- TensorFlow 2.17.0
+- numpy 1.23.5
+- matplotlib 3.10.9
+- tqdm 4.67.3
 
 ```bash
 pip install -r requirements.txt

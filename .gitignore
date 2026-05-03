@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+data/*
+*.gz
+*.tar.gz
+
+
+.claude/
+.vscode/
+.cursor/
+
+*.pth

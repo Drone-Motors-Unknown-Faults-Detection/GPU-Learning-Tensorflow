@@ -21,11 +21,11 @@
 兩層卷積 + 兩層全連接的簡單 CNN：
 
 ```
-輸入 (1×28×28)
-→ Conv2d(1→32) + ReLU + MaxPool  →  32×14×14
-→ Conv2d(32→64) + ReLU + MaxPool →  64×7×7
-→ Flatten → FC(3136→128) + ReLU + Dropout(0.5)
-→ FC(128→10)  →  10 個類別
+輸入 (28×28×1)
+→ Conv2D(32, 5×5) + ReLU + MaxPool  →  14×14×32
+→ Conv2D(64, 5×5) + ReLU + MaxPool  →  7×7×64
+→ Flatten → Dense(3136→128) + ReLU + Dropout(0.5)
+→ Dense(128→10)  →  10 個類別
 ```
 
 ### 超參數
@@ -34,7 +34,7 @@
 |------|----|
 | Batch Size | 128 |
 | Learning Rate | 0.001 |
-| Epochs | 10 |
+| Epochs | 50 |
 | Optimizer | Adam |
 
 ### 執行
@@ -62,13 +62,13 @@ python src/mnist.py
 簡化版 ResNet，三組殘差層逐步縮小特徵圖：
 
 ```
-輸入 (3×32×32)
-→ Conv2d(3→64) + BN + ReLU
-→ Layer1: 2× ResidualBlock(64→64)   →  64×32×32
-→ Layer2: 2× ResidualBlock(64→128)  →  128×16×16
-→ Layer3: 2× ResidualBlock(128→256) →  256×8×8
-→ AdaptiveAvgPool → Flatten
-→ FC(256→10)  →  10 個類別
+輸入 (32×32×3)
+→ Conv2D(64, 3×3) + BN + ReLU
+→ Layer1: 2× ResidualBlock(64→64)   →  32×32×64
+→ Layer2: 2× ResidualBlock(64→128)  →  16×16×128
+→ Layer3: 2× ResidualBlock(128→256) →  8×8×256
+→ GlobalAveragePooling → Flatten
+→ Dense(256→10)  →  10 個類別
 ```
 
 ResidualBlock 的 shortcut 連接讓梯度可以跳層傳遞，解決深層網路難以訓練的問題。
@@ -78,12 +78,13 @@ ResidualBlock 的 shortcut 連接讓梯度可以跳層傳遞，解決深層網�
 | 項目 | 值 |
 |------|----|
 | Batch Size | 256 |
-| Learning Rate | 0.001（每 10 epoch × 0.5） |
+| Learning Rate | 0.001（CosineDecay 衰減） |
 | Epochs | 20 |
 | Optimizer | Adam |
-| LR Scheduler | StepLR(step=10, gamma=0.5) |
+| LR Scheduler | CosineDecay |
+| Weight Decay | 1e-4（L2 正則化） |
 
-訓練集使用隨機裁切（RandomCrop）與水平翻轉（RandomHorizontalFlip）做資料增強。
+訓練集使用隨機裁切（RandomCrop）、水平翻轉（RandomHorizontalFlip）與色彩抖動（ColorJitter）資料增強。
 
 ### 執行
 
@@ -110,14 +111,14 @@ python src/cifar10.py
 比 CIFAR-10 版多一組殘差層，以容納 100 個分類所需的特徵容量：
 
 ```
-輸入 (3×32×32)
-→ Conv2d(3→64) + BN + ReLU
-→ Layer1: 2× ResidualBlock(64→64)    →  64×32×32
-→ Layer2: 2× ResidualBlock(64→128)   →  128×16×16
-→ Layer3: 2× ResidualBlock(128→256)  →  256×8×8
-→ Layer4: 2× ResidualBlock(256→512)  →  512×4×4
-→ AdaptiveAvgPool → Dropout(0.3) → Flatten
-→ FC(512→100)  →  100 個類別
+輸入 (32×32×3)
+→ Conv2D(64, 3×3) + BN + ReLU
+→ Layer1: 2× ResidualBlock(64→64)    →  32×32×64
+→ Layer2: 2× ResidualBlock(64→128)   →  16×16×128
+→ Layer3: 2× ResidualBlock(128→256)  →  8×8×256
+→ Layer4: 2× ResidualBlock(256→512)  →  4×4×512
+→ GlobalAveragePooling → Dropout(0.3) → Flatten
+→ Dense(512→100)  →  100 個類別
 ```
 
 ### 超參數
@@ -125,10 +126,10 @@ python src/cifar10.py
 | 項目 | 值 |
 |------|----|
 | Batch Size | 128 |
-| Learning Rate | 0.001（CosineAnnealing 衰減） |
+| Learning Rate | 0.001（CosineDecay 衰減） |
 | Epochs | 30 |
 | Optimizer | Adam |
-| LR Scheduler | CosineAnnealingLR(T_max=30) |
+| LR Scheduler | CosineDecay |
 | Dropout | 0.3（FC 前） |
 
 訓練集使用 RandomCrop、RandomHorizontalFlip 與 ColorJitter 資料增強。
@@ -145,60 +146,53 @@ python src/cifar100.py
 
 ## 如何讓模型跑在 GPU 上
 
-本專案已在 `src/device.py` 內集中處理裝置選擇，會依序嘗試：
-
-- NVIDIA GPU：`cuda`
-- Apple Silicon（macOS）：`mps`（若 PyTorch 支援）
-- 其他：`cpu`
+本專案已在 `src/device.py` 內集中處理裝置選擇，TensorFlow 會自動偵測可用的 GPU 並分配運算。
 
 ### NVIDIA GPU（CUDA）
 
-PyTorch 用一行就能偵測 NVIDIA GPU：
+TensorFlow 自動偵測 NVIDIA GPU：
 
 ```python
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gpus = tf.config.list_physical_devices('GPU')
+# 若 gpus 非空，TF 即自動使用 GPU
 ```
 
-有 NVIDIA GPU 且安裝了 CUDA 驅動時，`device` 會是 `cuda`，否則自動退回 `cpu`。
+只要安裝了 CUDA 驅動與對應的 TensorFlow 版本，所有運算會自動在 GPU 上執行，不需要手動搬移張量。
 
-### Mac（Apple Silicon）GPU：MPS
+### Mac（Apple Silicon）GPU：Metal
 
-在 Apple Silicon（M1/M2/M3…）的 macOS 上，PyTorch 可透過 `mps` 使用 GPU（Metal）。
+在 Apple Silicon（M1/M2/M3…）的 macOS 上，TensorFlow 透過 `tensorflow-metal` 外掛使用 Metal GPU。
 
-你可以用以下方式檢查：
+安裝方式：
+
+```bash
+pip install tensorflow-metal
+```
+
+安裝後，`tf.config.list_physical_devices('GPU')` 會回傳 Metal GPU，TF 會自動使用它。
+
+你可以用以下方式確認：
 
 ```python
-import torch
+import tensorflow as tf
 
-print("mps built:", torch.backends.mps.is_built())
-print("mps available:", torch.backends.mps.is_available())
+print(tf.config.list_physical_devices('GPU'))
 ```
 
-若 `is_available()` 為 `True`，本專案會自動選用 `mps`。
+若有輸出 Metal 裝置，即表示 GPU 加速已啟用。
 
-接著只要把**模型**和**資料**都搬到同一個 device 上即可：
+### TF 資料管線：tf.data
+
+本專案使用 `tf.data.Dataset` 取代 PyTorch 的 DataLoader，透過 `.prefetch(tf.data.AUTOTUNE)` 讓 GPU 計算與 CPU 資料預載平行進行：
 
 ```python
-model = ResNet().to(device)   # 模型搬到 GPU
-
-images = images.to(device)   # 每個 batch 的資料也要搬
-labels = labels.to(device)
+train_dataset = (
+    tf.data.Dataset.from_tensor_slices((x_train, y_train))
+    .shuffle(len(x_train))
+    .batch(batch_size)
+    .prefetch(tf.data.AUTOTUNE)
+)
 ```
-
-這樣前向傳播、反向傳播、梯度更新全部都會在 GPU 上執行。
-
-### DataLoader 的 pin_memory
-
-```python
-DataLoader(..., num_workers=4, pin_memory=True)
-```
-
-- `pin_memory=True`：將資料預先鎖定在記憶體，讓 CPU → GPU 的傳輸更快
-- `num_workers=4`：用多個子行程預先載入資料，避免 GPU 等待
-
-> **Mac（MPS）注意事項**：本專案在 `mps` 模式下預設使用 `num_workers=0`，避免部分環境出現多行程 DataLoader 的穩定性問題（設定在 `src/device.py` 的 `get_dataloader_kwargs_for_device`）。
-
-> **Windows 注意事項**：`num_workers > 0` 在 Windows 上需要把訓練程式包在 `if __name__ == '__main__':` 裡，否則會因為 spawn 機制重複執行腳本而出錯。
 
 ---
 
@@ -216,7 +210,7 @@ logs/
     └── training_log_20260502_023456.txt
 ```
 
-報告表頭會包含 **電腦名稱（hostname）**、**完整 Python 版本**（例如 `3.10.12`，與 `platform.python_version()` 一致）、**PyTorch 版本**（`torch.__version__`）、**訓練裝置與裝置名稱**。若實際使用 **NVIDIA GPU（CUDA）** 訓練，會額外寫入 **CUDA 版本**（對應 PyTorch 建置時綁定的 `torch.version.cuda`，與驅動程式顯示的 CUDA 可能略有差異）。
+報告表頭會包含 **電腦名稱（hostname）**、**完整 Python 版本**、**TensorFlow 版本**（`tf.__version__`）、**訓練裝置與裝置名稱**。若實際使用 **NVIDIA GPU（CUDA）** 訓練，會額外寫入 **CUDA 版本**。
 
 透過頂部的 `ENABLE_LOGGING` 旗標控制是否匯出：
 
@@ -229,15 +223,20 @@ ENABLE_LOGGING = True   # 改為 False 可關閉
 ## 環境需求
 
 - Python 3.8+
-- PyTorch
-- torchvision
+- TensorFlow 2.12+
 - tqdm
 
 ```bash
-pip install torch torchvision tqdm
+pip install -r requirements.txt
 ```
 
-若你需要 **CUDA** 或 **macOS MPS** 對應的 PyTorch 版本，請至 [pytorch.org](https://pytorch.org) 依照作業系統與硬體選擇安裝指令。
+若使用 **Apple Silicon Mac**，額外安裝：
+
+```bash
+pip install tensorflow-metal
+```
+
+若需要 **NVIDIA CUDA** 支援，請至 [tensorflow.org](https://www.tensorflow.org/install/pip) 依照作業系統與 CUDA 版本選擇安裝指令。
 
 
 ## 作者資訊

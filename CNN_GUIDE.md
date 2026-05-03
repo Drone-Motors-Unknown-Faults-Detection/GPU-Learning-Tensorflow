@@ -32,8 +32,8 @@ MNIST 有 60,000 張圖，batch size 設為 128，所以一個 epoch 會跑 469 
 這個程式的第一層卷積用了 32 個過濾器，第二層用了 64 個：
 
 ```python
-self.conv1 = nn.Conv2d(1, 32, kernel_size=5, padding=2)
-self.conv2 = nn.Conv2d(32, 64, kernel_size=5, padding=2)
+self.conv1 = tf.keras.layers.Conv2D(32, kernel_size=5, padding='same')
+self.conv2 = tf.keras.layers.Conv2D(64, kernel_size=5, padding='same')
 ```
 
 ---

@@ -1,14 +1,10 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+import tensorflow as tf
+import numpy as np
 import time
 from tqdm import tqdm
 from logger import TrainingLogger
 from device import (
-    get_best_torch_device,
-    get_dataloader_kwargs_for_device,
+    get_best_tf_device,
     get_device_display_info,
     get_mac_chip_info,
 )
@@ -17,86 +13,81 @@ from device import (
 ENABLE_LOGGING = True
 
 
-class CNN(nn.Module):
+class CNN(tf.keras.Model):
     """兩層卷積 + 兩層全連接的 CNN，用於 MNIST 10 類分類。"""
 
     def __init__(self):
         super(CNN, self).__init__()
-        # 卷積層：1 通道輸入 → 32 特徵圖，padding=2 保持 28×28 尺寸
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=5, padding=2)
-        # 卷積層：32 → 64 特徵圖
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=5, padding=2)
-        # 每次 Pooling 將尺寸減半：28→14→7
-        self.pool = nn.MaxPool2d(2, 2)
-        # 攤平後 64×7×7 = 3136 個特徵
-        self.fc1 = nn.Linear(64 * 7 * 7, 128)
-        self.fc2 = nn.Linear(128, 10)
-        self.relu = nn.ReLU()
+        # TF 預設 channels_last 格式：(batch, height, width, channels)
+        # padding='same' 保持空間尺寸不變（等同 PyTorch 的 padding=2 for 5×5 kernel）
+        self.conv1 = tf.keras.layers.Conv2D(32, kernel_size=5, padding='same')
+        self.pool1 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2)
+        self.conv2 = tf.keras.layers.Conv2D(64, kernel_size=5, padding='same')
+        self.pool2 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2)
+        # 攤平後 7×7×64 = 3136 個特徵
+        self.flatten = tf.keras.layers.Flatten()
+        self.fc1 = tf.keras.layers.Dense(128)
         # 訓練時隨機關閉 50% 神經元，防止過擬合
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = tf.keras.layers.Dropout(0.5)
+        self.fc2 = tf.keras.layers.Dense(10)
 
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))  # 32×28×28 → 32×14×14
-        x = self.pool(self.relu(self.conv2(x)))  # 64×14×14 → 64×7×7
-        x = x.view(x.size(0), -1)               # 攤平成 (batch, 3136)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)                          # 輸出 10 個 logits
+    def call(self, x, training=False):
+        x = self.pool1(tf.nn.relu(self.conv1(x)))   # 32×28×28 → 32×14×14
+        x = self.pool2(tf.nn.relu(self.conv2(x)))   # 64×14×14 → 64×7×7
+        x = self.flatten(x)                          # 攤平成 (batch, 3136)
+        x = tf.nn.relu(self.fc1(x))
+        x = self.dropout(x, training=training)
+        x = self.fc2(x)                              # 輸出 10 個 logits
         return x
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device):
+@tf.function
+def train_step(model, images, labels, loss_fn, optimizer):
+    with tf.GradientTape() as tape:
+        predictions = model(images, training=True)
+        loss = loss_fn(labels, predictions)
+    gradients = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    return loss, predictions
+
+
+def train_epoch(model, dataset, loss_fn, optimizer, num_batches):
     """執行一個 epoch 的訓練，回傳平均 loss 與訓練準確率。"""
-    model.train()
-    total_loss = 0
+    total_loss = 0.0
     correct = 0
     total = 0
 
-    for images, labels in tqdm(train_loader, desc="訓練"):
-        images = images.to(device)
-        labels = labels.to(device)
+    for images, labels in tqdm(dataset, total=num_batches, desc="訓練"):
+        loss, predictions = train_step(model, images, labels, loss_fn, optimizer)
 
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        total_loss += float(loss)
+        predicted = tf.argmax(predictions, axis=1, output_type=tf.int32)
+        correct += int(tf.reduce_sum(tf.cast(predicted == tf.cast(labels, tf.int32), tf.int32)).numpy())
+        total += int(labels.shape[0])
 
-        # 清除上一步殘留的梯度，再反向傳播更新權重
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        _, predicted = torch.max(outputs.data, 1)
-        correct += (predicted == labels).sum().item()
-        total += labels.size(0)
-
-    avg_loss = total_loss / len(train_loader)
-    accuracy = 100 * correct / total
+    avg_loss = total_loss / num_batches
+    accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
 
-def test(model, test_loader, device):
+def test(model, dataset, num_batches):
     """在測試集上評估模型，回傳準確率。"""
-    model.eval()
     correct = 0
     total = 0
 
-    with torch.no_grad():  # 推論不需要計算梯度，節省記憶體
-        for images, labels in tqdm(test_loader, desc="測試"):
-            images = images.to(device)
-            labels = labels.to(device)
+    # TF 不需要 no_grad 情境：只要不在 GradientTape 內，就不會記錄梯度
+    for images, labels in tqdm(dataset, total=num_batches, desc="測試"):
+        predictions = model(images, training=False)
+        predicted = tf.argmax(predictions, axis=1, output_type=tf.int32)
+        correct += int(tf.reduce_sum(tf.cast(predicted == tf.cast(labels, tf.int32), tf.int32)).numpy())
+        total += int(labels.shape[0])
 
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            correct += (predicted == labels).sum().item()
-            total += labels.size(0)
-
-    accuracy = 100 * correct / total
+    accuracy = 100.0 * correct / total
     return accuracy
 
 
 if __name__ == '__main__':
-    # Windows 多行程需要在 __main__ 保護下啟動，否則 DataLoader worker 會重複執行整個腳本
-    device = get_best_torch_device(prefer_mps=True)
+    device = get_best_tf_device()
     device_type, device_detail = get_device_display_info(device)
     print(f"使用設備: {device} ({device_type})")
     if device_detail:
@@ -112,31 +103,43 @@ if __name__ == '__main__':
     epochs = 50
 
     # 標準化參數來自 MNIST 全資料集的均值與標準差
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
+    mean = np.float32(0.1307)
+    std = np.float32(0.3081)
 
     print("\n加載 MNIST 數據...")
-    train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
-    test_dataset = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
+    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
 
-    # pin_memory=True 讓 CPU→GPU 資料傳輸更快；num_workers 使用多行程預載資料
-    dl_kwargs = get_dataloader_kwargs_for_device(device)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, **dl_kwargs)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, **dl_kwargs)
+    # 加入 channel 維度：(N, 28, 28) → (N, 28, 28, 1)，轉 float32 並正規化
+    x_train = (x_train[..., np.newaxis].astype(np.float32) / 255.0 - mean) / std
+    x_test = (x_test[..., np.newaxis].astype(np.float32) / 255.0 - mean) / std
 
-    model = CNN().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    num_train_batches = int(np.ceil(len(x_train) / batch_size))
+    num_test_batches = int(np.ceil(len(x_test) / batch_size))
+
+    # prefetch 讓 GPU 計算與 CPU 資料預載平行進行，減少等待
+    train_dataset = (
+        tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        .shuffle(len(x_train))
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    test_dataset = (
+        tf.data.Dataset.from_tensor_slices((x_test, y_test))
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+    model = CNN()
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
     print("\n開始訓練...\n")
     start_time = time.time()
     logger.start()
 
     for epoch in range(epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-        test_acc = test(model, test_loader, device)
+        train_loss, train_acc = train_epoch(model, train_dataset, loss_fn, optimizer, num_train_batches)
+        test_acc = test(model, test_dataset, num_test_batches)
         elapsed = time.time() - start_time
 
         print(f"Epoch [{epoch+1}/{epochs}] - Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%")
@@ -148,5 +151,5 @@ if __name__ == '__main__':
     logger.finish(total_time)
     logger.export(title="MNIST CNN 訓練紀錄", output_dir="./logs/MNIST")
 
-    torch.save(model.state_dict(), 'mnist_cnn.pth')
-    print("模型已保存為 mnist_cnn.pth")
+    model.save_weights('mnist_cnn.weights.h5')
+    print("模型已保存為 mnist_cnn.weights.h5")

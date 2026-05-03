@@ -7,7 +7,7 @@ MNIST 是最入門的影像分類基準，包含 0 ~ 9 共 10 種手寫數字的
 - **腳本**：`src/mnist.py`
 - **執行腳本**：`mnist.sh`
 - **日誌目錄**：`logs/MNIST/`
-- **模型輸出**：`mnist_cnn.pth`
+- **模型輸出**：`mnist_cnn.weights.h5`
 
 ---
 
@@ -15,7 +15,7 @@ MNIST 是最入門的影像分類基準，包含 0 ~ 9 共 10 種手寫數字的
 
 | 項目 | 內容 |
 |------|------|
-| 來源 | `torchvision.datasets.MNIST`（自動下載至 `./data/`） |
+| 來源 | `tf.keras.datasets.mnist`（自動下載至 `~/.keras/datasets/`） |
 | 訓練集 | 60,000 張 |
 | 測試集 | 10,000 張 |
 | 圖片大小 | 28 × 28（灰階，1 通道） |
@@ -24,28 +24,28 @@ MNIST 是最入門的影像分類基準，包含 0 ~ 9 共 10 種手寫數字的
 ### 前處理
 
 ```python
-transforms.ToTensor()
-transforms.Normalize(mean=(0.1307,), std=(0.3081,))
+# 加入 channel 維度並正規化
+x = (x[..., np.newaxis].astype(np.float32) / 255.0 - 0.1307) / 0.3081
 ```
 
-訓練集與測試集套用相同 transform，不做額外增強（資料集夠簡單，增強無顯著效益）。
+訓練集與測試集套用相同前處理，不做額外增強（資料集夠簡單，增強無顯著效益）。
 
 ---
 
 ## 模型架構
 
 ```
-輸入 (1 × 28 × 28)
+輸入 (28 × 28 × 1)
 │
-├─ Conv2d(1→32, kernel=5, padding=2) + ReLU + MaxPool(2,2)
-│    輸出：32 × 14 × 14
+├─ Conv2D(32, kernel=5×5, padding='same') + ReLU + MaxPool(2,2)
+│    輸出：14 × 14 × 32
 │
-├─ Conv2d(32→64, kernel=5, padding=2) + ReLU + MaxPool(2,2)
-│    輸出：64 × 7 × 7
+├─ Conv2D(64, kernel=5×5, padding='same') + ReLU + MaxPool(2,2)
+│    輸出：7 × 7 × 64
 │
 ├─ Flatten  →  3136
-├─ Linear(3136 → 128) + ReLU + Dropout(0.5)
-└─ Linear(128 → 10)
+├─ Dense(3136 → 128) + ReLU + Dropout(0.5)
+└─ Dense(128 → 10)
      輸出：10 個 logits
 ```
 
@@ -63,9 +63,9 @@ transforms.Normalize(mean=(0.1307,), std=(0.3081,))
 |--------|----|
 | Batch Size | 128 |
 | Learning Rate | 0.001 |
-| Epochs | 10 |
+| Epochs | 50 |
 | Optimizer | Adam |
-| Loss | CrossEntropyLoss |
+| Loss | SparseCategoricalCrossentropy(from\_logits=True) |
 | LR Scheduler | 無 |
 
 ---
@@ -90,7 +90,7 @@ bash mnist.sh
 | 5     | ~99%         |
 | 10    | ~99.3%       |
 
-訓練在 Apple M4 Pro（MPS）約 53 秒完成 10 個 epoch。
+訓練在 Apple M4 Pro（Metal）約 53 秒完成 10 個 epoch。
 
 ---
 
@@ -100,13 +100,13 @@ bash mnist.sh
 ==================================================
 MNIST CNN 訓練紀錄
 ==================================================
-電腦名稱     : Mac.youyu08.in
-Python 版本  : 3.10.12
-PyTorch 版本 : 2.2.0
-訓練裝置類型 : MPS
-裝置名稱     : Apple M4 Pro
-訓練開始時間 : 2026-05-02 11:50:07
-總訓練時間   : 53.40 秒
+電腦名稱         : Mac.youyu08.in
+Python 版本      : 3.10.12
+TensorFlow 版本  : 2.16.1
+訓練裝置類型     : METAL
+裝置名稱         : Apple M4 Pro
+訓練開始時間     : 2026-05-02 11:50:07
+總訓練時間       : 53.40 秒
 
 --------------------------------------------------
 Epoch    Loss       Train Acc    Test Acc     累計時間

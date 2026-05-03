@@ -1,14 +1,10 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+import tensorflow as tf
+import numpy as np
 import time
 from tqdm import tqdm
 from logger import TrainingLogger
 from device import (
-    get_best_torch_device,
-    get_dataloader_kwargs_for_device,
+    get_best_tf_device,
     get_device_display_info,
     get_mac_chip_info,
 )
@@ -16,123 +12,131 @@ from device import (
 # 設為 False 可關閉訓練紀錄匯出
 ENABLE_LOGGING = True
 
+# L2 正則化強度（等同 PyTorch Adam 的 weight_decay=1e-4）
+_L2 = tf.keras.regularizers.l2(1e-4)
 
-class ResidualBlock(nn.Module):
+
+class ResidualBlock(tf.keras.layers.Layer):
     """單一殘差塊：兩層 3×3 卷積 + shortcut 連接，避免深層網路梯度消失。"""
 
     def __init__(self, in_channels, out_channels, stride=1):
         super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.conv1 = tf.keras.layers.Conv2D(
+            out_channels, 3, strides=stride, padding='same', use_bias=False, kernel_regularizer=_L2
+        )
+        self.bn1 = tf.keras.layers.BatchNormalization()
+        self.conv2 = tf.keras.layers.Conv2D(
+            out_channels, 3, strides=1, padding='same', use_bias=False, kernel_regularizer=_L2
+        )
+        self.bn2 = tf.keras.layers.BatchNormalization()
 
         # 當尺寸或通道數改變時，shortcut 需要 1×1 卷積對齊維度
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride),
-                nn.BatchNorm2d(out_channels)
+        self.need_projection = (stride != 1 or in_channels != out_channels)
+        if self.need_projection:
+            self.shortcut_conv = tf.keras.layers.Conv2D(
+                out_channels, 1, strides=stride, use_bias=False, kernel_regularizer=_L2
             )
+            self.shortcut_bn = tf.keras.layers.BatchNormalization()
 
-    def forward(self, x):
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)  # 殘差相加
-        out = self.relu(out)
-        return out
+    def call(self, x, training=False):
+        out = tf.nn.relu(self.bn1(self.conv1(x), training=training))
+        out = self.bn2(self.conv2(out), training=training)
+
+        if self.need_projection:
+            shortcut = self.shortcut_bn(self.shortcut_conv(x), training=training)
+        else:
+            shortcut = x
+
+        return tf.nn.relu(out + shortcut)  # 殘差相加
 
 
-class ResNet(nn.Module):
+class ResNet(tf.keras.Model):
     """簡化版 ResNet，三組殘差層處理 CIFAR-10 的 32×32 彩色圖片（3 通道）。"""
 
     def __init__(self, num_classes=10):
         super(ResNet, self).__init__()
         # 初始卷積：3 通道輸入 → 64 特徵圖，不縮小尺寸
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
+        self.conv1 = tf.keras.layers.Conv2D(64, 3, strides=1, padding='same', use_bias=False, kernel_regularizer=_L2)
+        self.bn1 = tf.keras.layers.BatchNormalization()
 
-        self.layer1 = self._make_layer(64, 64, blocks=2, stride=1)   # 32×32
-        self.layer2 = self._make_layer(64, 128, blocks=2, stride=2)  # 16×16
-        self.layer3 = self._make_layer(128, 256, blocks=2, stride=2) # 8×8
+        self.layer1 = self._make_layer(64,  64,  blocks=2, stride=1)   # 32×32
+        self.layer2 = self._make_layer(64,  128, blocks=2, stride=2)   # 16×16
+        self.layer3 = self._make_layer(128, 256, blocks=2, stride=2)   # 8×8
 
-        # AdaptiveAvgPool 讓輸出固定為 1×1，不受輸入尺寸影響
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.dropout = nn.Dropout(0.3)
-        self.fc = nn.Linear(256, num_classes)
+        # GlobalAveragePooling2D 讓輸出固定為 1×1，不受輸入尺寸影響
+        self.avgpool = tf.keras.layers.GlobalAveragePooling2D()
+        self.dropout = tf.keras.layers.Dropout(0.3)
+        self.fc = tf.keras.layers.Dense(num_classes, kernel_regularizer=_L2)
 
     def _make_layer(self, in_channels, out_channels, blocks, stride):
         layers = [ResidualBlock(in_channels, out_channels, stride)]
         for _ in range(1, blocks):
             layers.append(ResidualBlock(out_channels, out_channels, stride=1))
-        return nn.Sequential(*layers)
+        return layers
 
-    def forward(self, x):
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)  # 攤平成 (batch, 256)
-        x = self.dropout(x)
-        x = self.fc(x)
+    def call(self, x, training=False):
+        x = tf.nn.relu(self.bn1(self.conv1(x), training=training))
+        for block in self.layer1:
+            x = block(x, training=training)
+        for block in self.layer2:
+            x = block(x, training=training)
+        for block in self.layer3:
+            x = block(x, training=training)
+        x = self.avgpool(x)                        # (batch, 256)
+        x = self.dropout(x, training=training)
+        x = self.fc(x)                             # (batch, num_classes) logits
         return x
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device):
+@tf.function
+def train_step(model, images, labels, loss_fn, optimizer):
+    with tf.GradientTape() as tape:
+        predictions = model(images, training=True)
+        loss = loss_fn(labels, predictions)
+        # 加入 kernel_regularizer 的 L2 損失（等同 weight_decay）
+        if model.losses:
+            loss += tf.add_n(model.losses)
+    gradients = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    return loss, predictions
+
+
+def train_epoch(model, dataset, loss_fn, optimizer, num_batches):
     """執行一個 epoch 的訓練，回傳平均 loss 與訓練準確率。"""
-    model.train()
-    total_loss = 0
+    total_loss = 0.0
     correct = 0
     total = 0
 
-    for images, labels in tqdm(train_loader, desc="訓練", leave=False):
-        images = images.to(device)
-        labels = labels.to(device)
+    for images, labels in tqdm(dataset, total=num_batches, desc="訓練", leave=False):
+        loss, predictions = train_step(model, images, labels, loss_fn, optimizer)
 
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        total_loss += float(loss)
+        predicted = tf.argmax(predictions, axis=1, output_type=tf.int32)
+        correct += int(tf.reduce_sum(tf.cast(predicted == tf.cast(labels, tf.int32), tf.int32)).numpy())
+        total += int(labels.shape[0])
 
-        # 清除上一步殘留的梯度，再反向傳播更新權重
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        _, predicted = torch.max(outputs.data, 1)
-        correct += (predicted == labels).sum().item()
-        total += labels.size(0)
-
-    avg_loss = total_loss / len(train_loader)
-    accuracy = 100 * correct / total
+    avg_loss = total_loss / num_batches
+    accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
 
-def test(model, test_loader, device):
+def test(model, dataset, num_batches):
     """在測試集上評估模型，回傳準確率。"""
-    model.eval()
     correct = 0
     total = 0
 
-    with torch.no_grad():  # 推論不需要計算梯度，節省記憶體
-        for images, labels in tqdm(test_loader, desc="測試", leave=False):
-            images = images.to(device)
-            labels = labels.to(device)
+    for images, labels in tqdm(dataset, total=num_batches, desc="測試", leave=False):
+        predictions = model(images, training=False)
+        predicted = tf.argmax(predictions, axis=1, output_type=tf.int32)
+        correct += int(tf.reduce_sum(tf.cast(predicted == tf.cast(labels, tf.int32), tf.int32)).numpy())
+        total += int(labels.shape[0])
 
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            correct += (predicted == labels).sum().item()
-            total += labels.size(0)
-
-    accuracy = 100 * correct / total
+    accuracy = 100.0 * correct / total
     return accuracy
 
 
 if __name__ == '__main__':
-    # Windows 多行程需要在 __main__ 保護下啟動，否則 DataLoader worker 會重複執行整個腳本
-    device = get_best_torch_device(prefer_mps=True)
+    device = get_best_tf_device()
     device_type, device_detail = get_device_display_info(device)
     print(f"使用設備: {device} ({device_type})")
     if device_detail:
@@ -147,46 +151,69 @@ if __name__ == '__main__':
     learning_rate = 0.001
     epochs = 20
 
-    # 訓練集：RandomCrop + HFlip + ColorJitter；色彩抖動減少模型對特定光照的依賴
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
-
-    # 測試集只做標準化，不做增強
-    test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
+    # CIFAR-10 官方統計值（各通道 mean/std）
+    mean = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
+    std  = np.array([0.2023, 0.1994, 0.2010], dtype=np.float32)
 
     print("\n加載 CIFAR-10 數據...")
-    train_dataset = datasets.CIFAR10(root='./data', train=True, transform=train_transform, download=True)
-    test_dataset = datasets.CIFAR10(root='./data', train=False, transform=test_transform, download=True)
+    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+    # Keras 回傳的 labels 為 (N, 1)，攤平成 (N,)
+    y_train = y_train.reshape(-1)
+    y_test  = y_test.reshape(-1)
 
-    # pin_memory=True 讓 CPU→GPU 資料傳輸更快；num_workers 使用多行程預載資料
-    dl_kwargs = get_dataloader_kwargs_for_device(device)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, **dl_kwargs)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, **dl_kwargs)
+    # 測試集：只做正規化（不做增強）
+    x_train_float = x_train.astype(np.float32) / 255.0
+    x_test_norm   = (x_test.astype(np.float32) / 255.0 - mean) / std
 
-    model = ResNet(num_classes=10).to(device)
+    num_train_batches = int(np.ceil(len(x_train) / batch_size))
+    num_test_batches  = int(np.ceil(len(x_test)  / batch_size))
+
+    # 訓練集資料增強：隨機裁切 + 水平翻轉 + 色彩抖動 + 正規化
+    # 順序與 torchvision 一致：先在 [0,1] float 影像上增強，再正規化
+    def augment_train(image, label):
+        # RandomCrop(32, padding=4)：pad 至 40×40 後隨機裁回 32×32
+        image = tf.image.resize_with_crop_or_pad(image, 40, 40)
+        image = tf.image.random_crop(image, [32, 32, 3])
+        image = tf.image.random_flip_left_right(image)
+        # ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)
+        image = tf.image.random_brightness(image, max_delta=0.2)
+        image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+        image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
+        image = tf.clip_by_value(image, 0.0, 1.0)
+        # Normalize
+        image = (image - mean) / std
+        return image, label
+
+    train_dataset = (
+        tf.data.Dataset.from_tensor_slices((x_train_float, y_train))
+        .shuffle(len(x_train))
+        .map(augment_train, num_parallel_calls=tf.data.AUTOTUNE)
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    test_dataset = (
+        tf.data.Dataset.from_tensor_slices((x_test_norm, y_test))
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+    model = ResNet(num_classes=10)
     # label_smoothing 讓模型不過度自信，緩解 train loss 壓到極低但 test acc 停滯的問題
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    # weight_decay 為 L2 正則化，直接懲罰過大的權重，是對抗 overfitting 最有效的手段之一
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    # CosineAnnealingLR 平滑衰減，避免 StepLR 在 epoch 10 造成 test acc 驟降（83%→76%）的情況
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, label_smoothing=0.1)
+    # CosineDecay 平滑衰減，避免 StepLR 在某 epoch 造成 test acc 驟降的問題
+    total_steps = epochs * num_train_batches
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=learning_rate, decay_steps=total_steps
+    )
+    optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
     print("\n開始訓練...\n")
     start_time = time.time()
     logger.start()
 
     for epoch in range(epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-        test_acc = test(model, test_loader, device)
-        scheduler.step()
+        train_loss, train_acc = train_epoch(model, train_dataset, loss_fn, optimizer, num_train_batches)
+        test_acc = test(model, test_dataset, num_test_batches)
         elapsed = time.time() - start_time
 
         print(f"Epoch [{epoch+1}/{epochs}] - Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%")
@@ -198,5 +225,5 @@ if __name__ == '__main__':
     logger.finish(total_time)
     logger.export(title="CIFAR-10 ResNet 訓練紀錄", output_dir="./logs/CIFAR10")
 
-    torch.save(model.state_dict(), 'cifar10_resnet.pth')
-    print("模型已保存為 cifar10_resnet.pth")
+    model.save_weights('cifar10_resnet.weights.h5')
+    print("模型已保存為 cifar10_resnet.weights.h5")

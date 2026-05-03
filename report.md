@@ -3,6 +3,7 @@
 **日期：** 2026-05-03
 **主機：** aero01
 **專案：** GPU-Learning-Tensorflow
+**報告人：** Albert W. 王建葦
 
 ---
 
@@ -36,7 +37,7 @@ Illegal instruction (core dumped)
 
 ## 三、問題分析
 
-### 問題 1（Critical）— CPU 缺少 AVX 指令集
+### 問題（Critical）— CPU 缺少 AVX 指令集
 
 **這是造成 crash 的直接原因。**
 
@@ -51,24 +52,7 @@ TensorFlow 2.6 以後的官方預編譯版本要求 CPU 支援 **AVX 指令集**
 
 ---
 
-### 問題 2（Critical）— CUDA Runtime 未安裝
-
-GPU driver 已存在，但 CUDA toolkit 未安裝：
-
-```
-✅ 已安裝：libcuda.so（GPU Driver，支援 CUDA 13.1）
-❌ 缺少：libcudart.so（CUDA Runtime）
-❌ 缺少：libcublas.so（cuBLAS）
-❌ 缺少：libcudnn.so（cuDNN）
-```
-
-TensorFlow 2.17.0 需要 **CUDA 12.3 + cuDNN 8.9** 才能使用 GPU。即使問題 1 解決，若 CUDA Runtime 未安裝，TF 仍只能跑 CPU（且速度會比應有的慢），或產生 GPU 找不到的警告。
-
----
-
 ## 四、修復建議
-
-### 修復問題 1：暴露 AVX 指令集
 
 **方法 A（推薦）：** 請有 hypervisor 管理權的人修改 VM 設定，讓 VM 使用宿主機 CPU 型號：
 
@@ -82,43 +66,3 @@ TensorFlow 2.17.0 需要 **CUDA 12.3 + cuDNN 8.9** 才能使用 GPU。即使問�
 ```bash
 -cpu host
 ```
-
-**方法 B（無需動 VM）：** 降版至不要求 AVX 的 TF：
-
-```bash
-pip install tensorflow==2.3.0
-```
-
-但 2.3.0 過舊（2020 年），許多新 API 不支援，不建議長期使用。
-
----
-
-### 修復問題 2：安裝 CUDA 12.3 Toolkit
-
-```bash
-# 安裝 CUDA 12.3（需 sudo）
-wget https://developer.download.nvidia.com/compute/cuda/12.3.0/local_installers/cuda_12.3.0_545.23.06_linux.run
-sudo sh cuda_12.3.0_545.23.06_linux.run --toolkit --silent --override
-
-# 加入環境變數
-echo 'export PATH=/usr/local/cuda-12.3/bin:$PATH' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.3/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
-source ~/.bashrc
-```
-
-安裝完後確認 TF 能偵測到 GPU：
-
-```bash
-python3 -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
-```
-
----
-
-## 五、問題優先順序
-
-```
-[1] 修問題 1（AVX）→ 讓 TF 能正常 import
-[2] 修問題 2（CUDA）→ 讓 GPU 可被 TF 使用
-```
-
-問題 1 不解決，其他什麼都跑不起來。
